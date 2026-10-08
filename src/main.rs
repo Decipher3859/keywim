@@ -1,6 +1,6 @@
 mod compositor;
 
 fn main() {
-    println!("Keywim starting...");
+    println!("Keywim starting... ");
     compositor::initialize();
 }
