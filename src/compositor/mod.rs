@@ -1,29 +1,51 @@
+mod helpers;
+mod input;
+mod rendering;
+
 use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
+use helpers::send_frames_surface_tree;
 use smithay::{
     backend::{
-        renderer::{Color32F, Frame, Renderer, gles::GlesRenderer},
+        renderer::{
+            Color32F, Frame, Renderer,
+            element::{
+                Kind,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            },
+            gles::GlesRenderer,
+            utils::{draw_render_elements, on_commit_buffer_handler},
+        },
         winit,
     },
-    delegate_compositor, delegate_seat, delegate_xdg_shell,
+    delegate_compositor, delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig},
     reexports::wayland_server::{
         Client, Display, DisplayHandle, ListeningSocket,
         backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
+        protocol::{wl_buffer, wl_seat::WlSeat, wl_surface::WlSurface},
     },
     utils::{Rectangle, Serial, Transform},
     wayland::{
-        compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        buffer::BufferHandler,
+        compositor::{
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            TraversalAction, with_surface_tree_downward,
+        },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
+        shm::{ShmHandler, ShmState},
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-delegate_seat!(KeywimState);
-delegate_compositor!(KeywimState);
 // Connects state with smithay protocol processing
+delegate_shm!(KeywimState);
+delegate_compositor!(KeywimState);
+delegate_seat!(KeywimState);
 delegate_xdg_shell!(KeywimState);
 
 pub struct KeywimState {
@@ -35,6 +57,7 @@ pub struct KeywimState {
     // Handles peripherie
     pub seat: Seat<KeywimState>,
     pub seat_state: SeatState<KeywimState>,
+    pub shm_state: ShmState,
     // Window and popup protocol
     pub xdg_shell_state: XdgShellState,
     // All currently registeres application Window
@@ -62,15 +85,21 @@ impl KeywimState {
             25,
         )
         .expect("Tastatur konnte nicht initialisiert werden.");
+        let shm_state = ShmState::new::<KeywimState>(display, vec![]);
         Self {
             compositor_state,
             display_handle: display.clone(),
             seat,
             seat_state,
+            shm_state,
             windows: Vec::new(),
             xdg_shell_state,
         }
     }
+}
+
+impl BufferHandler for KeywimState {
+    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
 impl CompositorHandler for KeywimState {
@@ -86,6 +115,8 @@ impl CompositorHandler for KeywimState {
     }
 
     fn commit(&mut self, _surface: &WlSurface) {
+        on_commit_buffer_handler::<KeywimState>(_surface);
+
         for window in &self.windows {
             if window.wl_surface() == _surface && !window.is_initial_configure_sent() {
                 window.send_configure();
@@ -109,6 +140,12 @@ impl SeatHandler for KeywimState {
         _seat: &Seat<Self>,
         _image: smithay::input::pointer::CursorImageStatus,
     ) {
+    }
+}
+
+impl ShmHandler for KeywimState {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
     }
 }
 
@@ -145,7 +182,6 @@ impl ClientData for KeywimClientState {
 
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
-
 pub fn initialize() {
     let mut display: Display<KeywimState> =
         Display::new().expect("Wayland-Display konnte nicht erstellt werden.");
@@ -191,6 +227,7 @@ pub fn initialize() {
         )
         .expect("Socket konnte nicht registriert werden.");
 
+    let start_time = Instant::now();
     loop {
         winit_event_loop.dispatch_new_events(|event| {
             println!("Winit-Ereignis: {:?}", event);
@@ -204,13 +241,31 @@ pub fn initialize() {
                 .bind()
                 .expect("Framebuffer konnte nicht gebunden werden.");
 
+            let elements = state
+                .windows
+                .iter()
+                .flat_map(|window| {
+                    render_elements_from_surface_tree(
+                        renderer,
+                        window.wl_surface(),
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                })
+                .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
+
             let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Normal)
+                .render(&mut framebuffer, size, Transform::Flipped180)
                 .expect("Frame konnte nicht erstellt werden.");
 
             frame
                 .clear(Color32F::new(0.0, 0.6, 0.7, 1.0), &[damage])
                 .expect("Frame konnte nicht eingefärbt werden.");
+
+            draw_render_elements(&mut frame, 1.0, &elements, &[damage])
+                .expect("Client-Surfaces konnten nicht gerendert werden.");
 
             let _sync = frame
                 .finish()
@@ -220,6 +275,10 @@ pub fn initialize() {
         backend
             .submit(Some(&[damage]))
             .expect("Frame konnte nicht angezeigt werden.");
+
+        for window in &state.windows {
+            send_frames_surface_tree(window.wl_surface(), start_time.elapsed().as_millis() as u32);
+        }
 
         event_loop
             .dispatch(Some(Duration::from_millis(10)), &mut state)
