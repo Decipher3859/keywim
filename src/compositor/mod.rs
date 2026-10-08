@@ -6,6 +6,7 @@ use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
 use helpers::send_frames_surface_tree;
 use smithay::{
     backend::{
+        input::{InputEvent, KeyboardKeyEvent, ProximityState::In},
         renderer::{
             Color32F, Frame, Renderer,
             element::{
@@ -15,10 +16,13 @@ use smithay::{
             gles::GlesRenderer,
             utils::{draw_render_elements, on_commit_buffer_handler},
         },
-        winit,
+        winit::{self, WinitEvent},
     },
     delegate_compositor, delegate_seat, delegate_shm, delegate_xdg_shell,
-    input::{Seat, SeatHandler, SeatState, keyboard::XkbConfig},
+    input::{
+        Seat, SeatHandler, SeatState,
+        keyboard::{FilterResult, XkbConfig},
+    },
     reexports::wayland_server::{
         Client, Display, DisplayHandle, ListeningSocket,
         backend::{ClientData, ClientId, DisconnectReason},
@@ -27,10 +31,7 @@ use smithay::{
     utils::{Rectangle, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
-        compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            TraversalAction, with_surface_tree_downward,
-        },
+        compositor::{CompositorClientState, CompositorHandler, CompositorState},
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
@@ -114,11 +115,11 @@ impl CompositorHandler for KeywimState {
             .compositor_state
     }
 
-    fn commit(&mut self, _surface: &WlSurface) {
-        on_commit_buffer_handler::<KeywimState>(_surface);
+    fn commit(&mut self, surface: &WlSurface) {
+        on_commit_buffer_handler::<KeywimState>(surface);
 
         for window in &self.windows {
-            if window.wl_surface() == _surface && !window.is_initial_configure_sent() {
+            if window.wl_surface() == surface && !window.is_initial_configure_sent() {
                 window.send_configure();
             }
         }
@@ -153,16 +154,20 @@ impl XdgShellHandler for KeywimState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
-    fn new_toplevel(&mut self, _surface: ToplevelSurface) {
-        _surface.send_configure();
-        self.windows.push(_surface);
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        surface.send_configure();
+        self.windows.push(surface.clone());
+
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(surface.wl_surface().clone()), 0.into());
+        }
         println!("Fenster registriert: {}", self.windows.len());
     }
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
+        surface: PopupSurface,
         _positioner: PositionerState,
         _token: u32,
     ) {
@@ -228,14 +233,35 @@ pub fn initialize() {
         .expect("Socket konnte nicht registriert werden.");
 
     let start_time = Instant::now();
-    loop {
-        winit_event_loop.dispatch_new_events(|event| {
-            println!("Winit-Ereignis: {:?}", event);
-        });
+    let mut last_report = Instant::now();
 
+    loop {
+        winit_event_loop.dispatch_new_events(|event| match event {
+            WinitEvent::Input(InputEvent::Keyboard { event }) => {
+                if let Some(keyboard) = state.seat.get_keyboard() {
+                    keyboard.input::<(), _>(
+                        &mut state,
+                        event.key_code(),
+                        event.state(),
+                        0.into(),
+                        0,
+                        |_, _, _| FilterResult::Forward,
+                    );
+                }
+            }
+            _ => {}
+        });
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 
+        for window in &state.windows {
+            window.with_pending_state(|pending| {
+                pending.size = Some((size.w, size.h).into());
+            });
+            window.send_pending_configure();
+        }
+
+        let render_start = Instant::now();
         {
             let (renderer, mut framebuffer) = backend
                 .bind()
@@ -272,9 +298,20 @@ pub fn initialize() {
                 .expect("Frame konnte nicht abgeschlossen werden.");
         }
 
+        let render_duration = render_start.elapsed();
+        let submit_start = Instant::now();
         backend
             .submit(Some(&[damage]))
             .expect("Frame konnte nicht angezeigt werden.");
+
+        let submit_duration = submit_start.elapsed();
+        if last_report.elapsed() >= Duration::from_secs(1) {
+            println!(
+                "Gesamt: {:?} | Submit: {:?}",
+                render_duration, submit_duration
+            );
+            last_report = Instant::now();
+        }
 
         for window in &state.windows {
             send_frames_surface_tree(window.wl_surface(), start_time.elapsed().as_millis() as u32);
