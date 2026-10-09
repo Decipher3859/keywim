@@ -1,4 +1,5 @@
 mod auth;
+mod session;
 
 use std::{
     fs,
@@ -30,15 +31,18 @@ fn main() -> Result<()> {
         if command.trim() == "AUTH" {
             let mut username = String::new();
             let mut password = String::new();
+            let mut session = String::new();
 
             reader.read_line(&mut username)?;
             reader.read_line(&mut password)?;
+            reader.read_line(&mut session)?;
 
             drop(reader);
 
-            let result = auth::authenticate(
+            let result = auth::run_session(
                 username.trim_end_matches(['\r', '\n']),
                 password.trim_end_matches(['\r', '\n']),
+                session.trim_end_matches(['\r', '\n']),
             );
 
             match result {

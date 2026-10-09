@@ -120,7 +120,12 @@ impl App {
             return Err("No session selected".into());
         }
 
-        daemon::authenticate(&self.username, &self.password)?;
+        let session = self
+            .sessions
+            .get(self.selected_session)
+            .ok_or("No session selected")?;
+
+        daemon::authenticate(&self.username, &self.password, session)?;
         Ok(())
     }
 }
