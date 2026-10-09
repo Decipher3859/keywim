@@ -1,3 +1,4 @@
+mod autostart;
 mod compositor;
 
 fn main() {

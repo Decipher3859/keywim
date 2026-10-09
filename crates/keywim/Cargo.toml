@@ -1,0 +1,9 @@
+[package]
+name = "keywim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+calloop = "0.14.5"
+calloop-wayland-source = "0.3.0"
+smithay = { version = "0.7.0", features = ["backend_winit"] }

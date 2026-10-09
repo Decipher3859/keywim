@@ -198,6 +198,7 @@ pub fn initialize() {
         "Wayland-Socket: {}",
         socket.socket_name().unwrap().to_string_lossy()
     );
+    let socket_name = socket.socket_name().unwrap().to_string_lossy().into_owned();
 
     let (mut backend, mut winit_event_loop) =
         winit::init::<GlesRenderer>().expect("Winit-Backend konnte nicht initialisiert werden.");
@@ -231,6 +232,11 @@ pub fn initialize() {
             },
         )
         .expect("Socket konnte nicht registriert werden.");
+
+    match crate::autostart::launch_alacritty(&socket_name) {
+        Ok(child) => println!("Alacritty gestartet: PID {}", child.id()),
+        Err(err) => eprintln!("Alacritty konnte nicht gestartet werden: {err}"),
+    }
 
     let start_time = Instant::now();
     let mut last_report = Instant::now();
