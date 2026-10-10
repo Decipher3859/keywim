@@ -1,6 +1,7 @@
 mod helpers;
 mod input;
 mod rendering;
+pub mod tty;
 
 use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
 use helpers::send_frames_surface_tree;
@@ -187,7 +188,7 @@ impl ClientData for KeywimClientState {
 
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
-pub fn initialize() {
+pub fn run_winit() {
     let mut display: Display<KeywimState> =
         Display::new().expect("Wayland-Display konnte nicht erstellt werden.");
 
