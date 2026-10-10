@@ -64,6 +64,9 @@ fn main() -> Result<()> {
                     eprintln!("Greeter response failed: {e}");
                 }
             }
+            if started && let Err(e) = stream.write_all(b"SESSION_ENDED\n") {
+                eprintln!("Greeter response failed: {e}");
+            }
         } else {
             drop(reader);
             stream.write_all(b"ERR Unknown\n")?;

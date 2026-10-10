@@ -1,4 +1,5 @@
 use crate::daemon;
+use std::{io::BufReader, os::unix::net::UnixStream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -106,7 +107,7 @@ impl App {
         }
     }
 
-    pub fn login(&mut self) -> Result<(), String> {
+    pub fn login(&mut self) -> Result<BufReader<UnixStream>, String> {
         if self.username.trim().is_empty() {
             self.focus = Focus::Username;
             return Err("Username is empty".into());
@@ -125,7 +126,8 @@ impl App {
             .get(self.selected_session)
             .ok_or("No session selected")?;
 
-        daemon::authenticate(&self.username, &self.password, session)?;
-        Ok(())
+        let result = daemon::authenticate(&self.username, &self.password, session);
+        self.password.clear();
+        result
     }
 }

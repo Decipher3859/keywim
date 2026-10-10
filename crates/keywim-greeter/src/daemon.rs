@@ -3,7 +3,11 @@ use std::{
     os::unix::net::UnixStream,
 };
 
-pub fn authenticate(username: &str, password: &str, session: &str) -> Result<(), String> {
+pub fn authenticate(
+    username: &str,
+    password: &str,
+    session: &str,
+) -> Result<BufReader<UnixStream>, String> {
     let mut stream = UnixStream::connect("/tmp/keywim-dev.sock")
         .map_err(|e| format!("Daemon connection failed: {e}"))?;
     if username.contains('\n') || password.contains('\n') {
@@ -15,14 +19,12 @@ pub fn authenticate(username: &str, password: &str, session: &str) -> Result<(),
     writeln!(stream, "{password}").map_err(|e| e.to_string())?;
     writeln!(stream, "{session}").map_err(|e| e.to_string())?;
 
+    let mut reader = BufReader::new(stream);
     let mut response = String::new();
-
-    BufReader::new(&stream)
-        .read_line(&mut response)
-        .map_err(|e| e.to_string())?;
+    reader.read_line(&mut response).map_err(|e| e.to_string())?;
 
     match response.trim() {
-        "OK" => Ok(()),
+        "OK" => Ok(reader),
         "DENIED" => Err("Authentication failed".into()),
         other => Err(format!("Unexpected daemon response: {other}")),
     }

@@ -5,7 +5,7 @@ mod ui;
 use app::{App, Focus, Mode};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::run;
-use std::io::Result;
+use std::io::{BufRead, Result};
 use ui::render;
 
 fn main() -> Result<()> {
@@ -25,14 +25,27 @@ fn main() -> Result<()> {
                         KeyCode::Esc => app.mode = Mode::Command,
 
                         KeyCode::Enter if app.focus == Focus::Login => match app.login() {
-                            Ok(()) => {
-                                app.error = Some("Daemon antwortet: OK".into());
+                            Ok(mut reader) => {
+                                terminal.draw(|frame| {
+                                    frame.render_widget(
+                                        ratatui::widgets::Paragraph::new("Sitzung läuft ..."),
+                                        frame.area(),
+                                    );
+                                })?;
+
+                                let mut message = String::new();
+                                let result = reader.read_line(&mut message);
+                                app = App::new();
+                                app.error = match result {
+                                    Ok(_) if message.trim() == "SESSION_ENDED" => None,
+                                    Ok(_) => Some("Unexpected connection fail".into()),
+                                    Err(e) => Some(format!("Connection error: {e}")),
+                                };
                             }
                             Err(error) => {
                                 app.error = Some(error);
                             }
                         },
-
                         KeyCode::Tab | KeyCode::Enter => app.next_focus(),
                         KeyCode::BackTab => app.previous_focus(),
 
