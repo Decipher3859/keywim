@@ -1,9 +1,11 @@
 use crate::app::{App, Focus, Mode};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Flex, Layout, Margin, Rect},
+    layout::{
+        Alignment, Constraint, Flex, HorizontalAlignment, Layout, Margin, Rect, VerticalAlignment,
+    },
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use std::fs;
 
@@ -12,7 +14,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let hostname = hostname.trim();
 
     let area = frame.area();
-    let panel = Layout::vertical([Constraint::Length(13)])
+    let panel = Layout::vertical([Constraint::Length(17)])
         .flex(Flex::Center)
         .split(area)[0];
 
@@ -29,26 +31,25 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(block, panel);
 
     let inner = panel.inner(Margin {
-        vertical: 2,
+        vertical: 1,
         horizontal: 3,
     });
 
     let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
         Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(3),
     ])
+    .flex(Flex::Center)
     .split(inner);
 
-    draw_field(
+    draw_row(
         frame,
         rows[0],
-        "User",
+        "Benutzer",
         &app.username,
         app.focus == Focus::Username,
     );
@@ -59,7 +60,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         "*".repeat(app.password.chars().count())
     };
 
-    draw_field(
+    draw_row(
         frame,
         rows[1],
         "Password",
@@ -73,7 +74,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .map(String::as_str)
         .unwrap_or("No session available");
 
-    draw_field(
+    draw_row(
         frame,
         rows[3],
         "Session",
@@ -81,13 +82,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         app.focus == Focus::Session,
     );
 
-    draw_field(
-        frame,
-        rows[5],
-        "",
-        "[ Anmelden ]",
-        app.focus == Focus::Login,
-    );
+    draw_button(frame, rows[5], "[ Anmelden ]", app.focus == Focus::Login);
 
     if let Some(error) = &app.error {
         let message = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
@@ -96,20 +91,42 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn draw_field(frame: &mut Frame, area: Rect, label: &str, value: &str, active: bool) {
+fn draw_row(frame: &mut Frame, area: Rect, label: &str, value: &str, active: bool) {
     let style = if active {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(Color::Cyan)
     };
 
-    let text = if label.is_empty() {
-        value.to_string()
-    } else {
-        format!("{label}: {value}")
-    };
+    let columns = Layout::horizontal([Constraint::Length(11), Constraint::Fill(1)]).split(area);
+    let text = value.to_string();
+    let centered = Layout::vertical([Constraint::Length(1)])
+        .flex(Flex::Center)
+        .split(columns[0])[0];
+    frame.render_widget(
+        Paragraph::new(label)
+            .alignment(HorizontalAlignment::Left)
+            .style(Style::default().fg(Color::White)),
+        centered,
+    );
 
-    frame.render_widget(Paragraph::new(text).style(style), area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::new().borders(Borders::ALL))
+            .style(style),
+        columns[1],
+    );
+}
+
+fn draw_button(frame: &mut Frame, area: Rect, value: &str, active: bool) {
+    frame.render_widget(
+        Paragraph::new(value).block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        ),
+        area,
+    )
 }

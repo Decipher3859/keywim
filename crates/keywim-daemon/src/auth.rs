@@ -3,7 +3,12 @@ use std::process::ExitStatus;
 use crate::session;
 use pam::Client;
 
-pub fn run_session(username: &str, password: &str, session: &str) -> Result<(), String> {
+pub fn run_session(
+    username: &str,
+    password: &str,
+    session: &str,
+    on_started: impl FnOnce(),
+) -> Result<(), String> {
     let mut auth = Client::with_password("keywim").map_err(|e| format!("PAM: {e:?}"))?;
 
     auth.conversation_mut().set_credentials(username, password);
@@ -19,7 +24,14 @@ pub fn run_session(username: &str, password: &str, session: &str) -> Result<(), 
         _ => return Err(format!("Unknown session: {session}")),
     };
     let user = session::resolve_user(username)?;
-    let status: ExitStatus = session::run(command, &user)?;
+
+    let mut child = session::run(command, &user)?;
+
+    on_started();
+
+    let status: ExitStatus = child
+        .wait()
+        .map_err(|e| format!("Session wait failed: {e}"))?;
 
     println!("Session exited with: {status}");
 

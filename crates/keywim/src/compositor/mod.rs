@@ -242,6 +242,7 @@ pub fn initialize() {
     let mut last_report = Instant::now();
 
     loop {
+        let mut close_requested = false;
         winit_event_loop.dispatch_new_events(|event| match event {
             WinitEvent::Input(InputEvent::Keyboard { event }) => {
                 if let Some(keyboard) = state.seat.get_keyboard() {
@@ -255,8 +256,15 @@ pub fn initialize() {
                     );
                 }
             }
+            WinitEvent::CloseRequested => {
+                close_requested = true;
+            }
             _ => {}
         });
+        if close_requested {
+            break;
+        }
+
         let size = backend.window_size();
         let damage = Rectangle::from_size(size);
 

@@ -3,10 +3,10 @@ use std::{
     ffi::CString,
     io::Error,
     os::unix::process::CommandExt,
-    process::{Command, ExitStatus},
+    process::{Child, Command},
 };
 
-pub fn run(command: &str, user: &User) -> Result<ExitStatus, String> {
+pub fn run(command: &str, user: &User) -> Result<Child, String> {
     let groups: Vec<Gid> = resolve_groups(user)?
         .into_iter()
         .map(Gid::from_raw)
@@ -32,7 +32,7 @@ pub fn run(command: &str, user: &User) -> Result<ExitStatus, String> {
         .env("USER", &user.name)
         .env("LOGNAME", &user.name)
         .env("XDG_RUNTIME_DIR", format!("/run/user/{}", user.uid))
-        .status()
+        .spawn()
         .map_err(|e| format!("Session start failed: {e}"))
 }
 

@@ -1,10 +1,11 @@
 mod auth;
 mod session;
 
+use nix::unistd::{Group, chown};
 use std::{
     fs,
-    io::{BufRead, BufReader, Result, Write},
-    os::unix::net::UnixListener,
+    io::{BufRead, BufReader, Error, Result, Write},
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
 };
 
@@ -17,6 +18,12 @@ fn main() -> Result<()> {
 
     let listener = UnixListener::bind(socket_path)?;
 
+    let group = Group::from_name("keywim-greeter")
+        .map_err(Error::from)?
+        .ok_or_else(|| Error::other("Group keywim-greeter missing"))?;
+
+    chown(socket_path, None, Some(group.gid)).map_err(Error::from)?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o660))?;
     println!("Keywim daemon listening on {socket_path}");
 
     for connection in listener.incoming() {
@@ -39,17 +46,22 @@ fn main() -> Result<()> {
 
             drop(reader);
 
+            let mut started = false;
             let result = auth::run_session(
                 username.trim_end_matches(['\r', '\n']),
                 password.trim_end_matches(['\r', '\n']),
                 session.trim_end_matches(['\r', '\n']),
+                || {
+                    started = true;
+                    if let Err(e) = stream.write_all(b"OK\n") {
+                        eprintln!("Greeter response failed: {e}");
+                    }
+                },
             );
-
-            match result {
-                Ok(()) => stream.write_all(b"OK\n")?,
-                Err(e) => {
-                    eprintln!("PAM authentication failed: {e}");
-                    stream.write_all(b"DENIED\n")?;
+            if let Err(e) = result {
+                eprintln!("Session failed: {e}");
+                if !started && let Err(e) = stream.write_all(b"DENIED\n") {
+                    eprintln!("Greeter response failed: {e}");
                 }
             }
         } else {

@@ -68,7 +68,7 @@ fn main() -> Result<()> {
                     },
 
                     Mode::Visual => match key.code {
-                        KeyCode::Esc => app.mode = Mode::Command,
+                        KeyCode::Esc | KeyCode::Char('v') => app.mode = Mode::Command,
 
                         _ => {}
                     },
