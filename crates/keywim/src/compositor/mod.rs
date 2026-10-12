@@ -19,15 +19,18 @@ use smithay::{
         },
         winit::{self, WinitEvent},
     },
-    delegate_compositor, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, XkbConfig},
     },
-    reexports::wayland_server::{
-        Client, Display, DisplayHandle, ListeningSocket,
-        backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer, wl_seat::WlSeat, wl_surface::WlSurface},
+    reexports::{
+        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
+        wayland_server::{
+            Client, Display, DisplayHandle, ListeningSocket,
+            backend::{ClientData, ClientId, DisconnectReason},
+            protocol::{wl_buffer, wl_seat::WlSeat, wl_surface::WlSurface},
+        },
     },
     utils::{Rectangle, Serial, Transform},
     wayland::{
@@ -35,6 +38,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            decoration::{XdgDecorationHandler, XdgDecorationState},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -49,6 +53,7 @@ delegate_shm!(KeywimState);
 delegate_compositor!(KeywimState);
 delegate_seat!(KeywimState);
 delegate_xdg_shell!(KeywimState);
+delegate_xdg_decoration!(KeywimState);
 
 pub struct KeywimState {
     // Handles Wayland Surfaces
@@ -62,6 +67,7 @@ pub struct KeywimState {
     pub shm_state: ShmState,
     // Window and popup protocol
     pub xdg_shell_state: XdgShellState,
+    pub xdg_decoration_state: XdgDecorationState,
     // All currently registeres application Window
     pub windows: Vec<ToplevelSurface>,
 }
@@ -76,6 +82,7 @@ impl KeywimState {
     pub fn new(display: &DisplayHandle) -> Self {
         let compositor_state = CompositorState::new::<KeywimState>(display);
         let xdg_shell_state = XdgShellState::new::<KeywimState>(display);
+        let xdg_decoration_state = XdgDecorationState::new::<KeywimState>(display);
         let mut seat_state: SeatState<KeywimState> = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "seat0");
         seat.add_keyboard(
@@ -96,10 +103,25 @@ impl KeywimState {
             shm_state,
             windows: Vec::new(),
             xdg_shell_state,
+            xdg_decoration_state,
         }
     }
 }
 
+impl XdgDecorationHandler for KeywimState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|pending| {
+            pending.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        self.new_decoration(toplevel);
+    }
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.new_decoration(toplevel);
+    }
+}
 impl BufferHandler for KeywimState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }

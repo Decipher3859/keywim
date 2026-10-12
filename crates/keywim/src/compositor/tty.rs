@@ -28,9 +28,11 @@ use smithay::{
         drm::control::{Device as _, ModeTypeFlags, connector::State},
         input::Libinput,
         rustix::fs::OFlags,
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Display, ListeningSocket},
     },
     utils::{Rectangle, SERIAL_COUNTER, Transform},
+    wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -326,6 +328,13 @@ pub fn run_tty() -> Result<(), String> {
                 if redraw {
                     redraw = false;
 
+                    for window in &state.windows {
+                        window.with_pending_state(|pending| {
+                            pending.size = Some((size.w, size.h).into());
+                            pending.states.set(xdg_toplevel::State::Maximized);
+                        });
+                        window.send_pending_configure();
+                    }
                     let (mut buffer, _) = buffered
                         .next_buffer()
                         .map_err(|e| format!("Next buffer failed: {e}"))?;
@@ -333,10 +342,19 @@ pub fn run_tty() -> Result<(), String> {
                         .windows
                         .iter()
                         .flat_map(|window| {
+                            let offset = with_states(window.wl_surface(), |states| {
+                                states
+                                    .cached_state
+                                    .get::<SurfaceCachedState>()
+                                    .current()
+                                    .geometry
+                                    .map(|g| (-g.loc.x, -g.loc.y))
+                                    .unwrap_or((0, 0))
+                            });
                             render_elements_from_surface_tree(
                                 &mut renderer,
                                 window.wl_surface(),
-                                (0, 0),
+                                offset,
                                 1.0,
                                 1.0,
                                 Kind::Unspecified,
