@@ -9,6 +9,8 @@ use smithay::{
         },
         drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         egl::{EGLContext, EGLDisplay},
+        input::{Event, InputEvent, KeyState, KeyboardKeyEvent},
+        libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, Color32F, Frame, Renderer,
             element::{
@@ -18,25 +20,35 @@ use smithay::{
             gles::GlesRenderer,
             utils::draw_render_elements,
         },
-        session::{Session, libseat::LibSeatSession},
+        session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::UdevBackend,
     },
+    input::keyboard::{FilterResult, keysyms},
     reexports::{
         drm::control::{Device as _, ModeTypeFlags, connector::State},
+        input::Libinput,
         rustix::fs::OFlags,
         wayland_server::{Display, ListeningSocket},
     },
-    utils::{Rectangle, Transform},
+    utils::{Rectangle, SERIAL_COUNTER, Transform},
 };
 use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 pub fn run_tty() -> Result<(), String> {
-    let (mut session, _notifier) =
+    let (mut session, seat_notifier) =
         LibSeatSession::new().map_err(|e| format!("Seat initialization failed: {e}"))?;
     println!("Seat opened: {}", session.seat());
+    let mut seat_notifier = Some(seat_notifier);
+    let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
+    libinput
+        .udev_assign_seat(&session.seat())
+        .map_err(|_| "Libinput seat assignment failed".to_string())?;
+    let mut input_backend = Some(LibinputInputBackend::new(libinput.clone()));
     let udev =
         UdevBackend::new(session.seat()).map_err(|e| format!("Udev initialization failed: {e}"))?;
 
@@ -165,8 +177,8 @@ pub fn run_tty() -> Result<(), String> {
                 .queue_buffer(Some(sync), None, ())
                 .map_err(|e| format!("Queue failed: {e}"))?;
             println!("Test frame queued");
-            let mut event_loop =
-                EventLoop::<bool>::try_new().map_err(|e| format!("Eventloop failed: {e}"))?;
+            let mut event_loop = EventLoop::<KeywimState>::try_new()
+                .map_err(|e| format!("Eventloop failed: {e}"))?;
 
             let mut wayland = Display::<KeywimState>::new()
                 .map_err(|e| format!("Wayland dislpay failed: {e}"))?;
@@ -177,17 +189,83 @@ pub fn run_tty() -> Result<(), String> {
             let mut terminal = crate::autostart::launch_alacritty(&socket_name)
                 .map_err(|e| format!("Alacritty failed: {e}"))?;
 
+            let seat_events = Rc::new(RefCell::new(Vec::<SessionEvent>::new()));
+            let pending_seat_events = seat_events.clone();
+
             event_loop
                 .handle()
-                .insert_source(drm_notifier, move |event, _, presented| match event {
-                    DrmEvent::VBlank(output) if output == crtc => *presented = true,
+                .insert_source(
+                    seat_notifier
+                        .take()
+                        .ok_or("Seat notifier already registered")?,
+                    move |event, _, _| {
+                        println!("Seat event received: {event:?}");
+                        pending_seat_events.borrow_mut().push(event);
+                    },
+                )
+                .map_err(|e| format!("Seat source failed: {e}"))?;
+
+            let presented = Rc::new(Cell::new(false));
+            let drm_presented = presented.clone();
+
+            event_loop
+                .handle()
+                .insert_source(drm_notifier, move |event, _, _| match event {
+                    DrmEvent::VBlank(output) if output == crtc => drm_presented.set(true),
                     DrmEvent::Error(e) => eprintln!("DRM event error: {e}"),
                     _ => {}
                 })
                 .map_err(|e| format!("DRM source failed: {e}"))?;
+
+            let mut input_session = session.clone();
+
+            event_loop
+                .handle()
+                .insert_source(
+                    input_backend
+                        .take()
+                        .ok_or("Input backend already registered")?,
+                    move |event, _, state| {
+                        if let InputEvent::Keyboard { event } = event {
+                            if let Some(keyboard) = state.seat.get_keyboard() {
+                                keyboard.input::<(), _>(
+                                    state,
+                                    event.key_code(),
+                                    event.state(),
+                                    SERIAL_COUNTER.next_serial(),
+                                    event.time_msec(),
+                                    |_, _, key| {
+                                        let sym = key.modified_sym().raw();
+                                        let first = keysyms::KEY_XF86Switch_VT_1;
+                                        let last = keysyms::KEY_XF86Switch_VT_12;
+
+                                        if (first..=last).contains(&sym) {
+                                            if event.state() == KeyState::Pressed {
+                                                let vt = (sym - first + 1) as i32;
+                                                if let Err(e) = input_session.change_vt(vt) {
+                                                    eprintln!("TTY switch failed: {e}");
+                                                }
+                                            }
+                                            return FilterResult::Intercept(());
+                                        }
+                                        FilterResult::Forward
+                                    },
+                                );
+                            }
+                        }
+                    },
+                )
+                .map_err(|e| format!("Input source failed: {e}"))?;
             let start = Instant::now();
-            let mut presented = false;
-            while start.elapsed() < Duration::from_secs(10) {
+            let mut redraw = false;
+            loop {
+                if let Some(status) = terminal
+                    .try_wait()
+                    .map_err(|e| format!("Terminal status failed: {e}"))?
+                {
+                    println!("Terminal exited: {status}");
+                    break;
+                }
                 while let Some(stream) =
                     socket.accept().map_err(|e| format!("Accept failed: {e}"))?
                 {
@@ -204,14 +282,49 @@ pub fn run_tty() -> Result<(), String> {
                     .map_err(|e| format!("Client flush failed: {e}"))?;
 
                 event_loop
-                    .dispatch(Some(Duration::from_millis(16)), &mut presented)
+                    .dispatch(Some(Duration::from_millis(16)), &mut state)
                     .map_err(|e| format!("Dispatch failed: {e}"))?;
 
-                if presented {
+                for event in seat_events.borrow_mut().drain(..) {
+                    match event {
+                        SessionEvent::PauseSession => {
+                            libinput.suspend();
+                            device.pause();
+                            presented.set(false);
+                            println!("Seat paused");
+                        }
+                        SessionEvent::ActivateSession => {
+                            device
+                                .activate(true)
+                                .map_err(|e| format!("DRM resume failed: {e}"))?;
+                            libinput
+                                .resume()
+                                .map_err(|_| "Libinput resume failed".to_string())?;
+                            buffered
+                                .frame_submitted()
+                                .map_err(|e| format!("Frame recovery failed: {e}"))?;
+                            buffered.reset_buffers();
+                            presented.set(false);
+                            redraw = true;
+                            println!("Seat resumed");
+                        }
+                    }
+                }
+
+                if !device.is_active() {
+                    presented.set(false);
+                    continue;
+                }
+
+                if presented.replace(false) {
                     buffered
                         .frame_submitted()
                         .map_err(|e| format!("Frame completion failed: {e}"))?;
-                    presented = false;
+                    redraw = true;
+                }
+
+                if redraw {
+                    redraw = false;
 
                     let (mut buffer, _) = buffered
                         .next_buffer()
@@ -245,9 +358,17 @@ pub fn run_tty() -> Result<(), String> {
                             .map_err(|e| format!("Draw surfaces failed: {e}"))?;
                         frame.finish().map_err(|e| format!("Finish failed: {e}"))?
                     };
-                    buffered
-                        .queue_buffer(Some(sync), None, ())
-                        .map_err(|e| format!("Queue failed: {e}"))?;
+                    if let Err(e) = buffered.queue_buffer(Some(sync), None, ()) {
+                        eprintln!("Queue failed before seat check: {e}");
+                        event_loop
+                            .dispatch(Some(Duration::from_millis(100)), &mut state)
+                            .map_err(|e| format!("Diagnostic dispatch failed: {e}"))?;
+                        if !session.is_active() {
+                            redraw = true;
+                            continue;
+                        }
+                        return Err(format!("Queue failed: {e}"));
+                    }
 
                     for window in &state.windows {
                         send_frames_surface_tree(
@@ -257,9 +378,6 @@ pub fn run_tty() -> Result<(), String> {
                     }
                 }
             }
-
-            let _ = terminal.kill();
-            let _ = terminal.wait();
 
             break;
         }
