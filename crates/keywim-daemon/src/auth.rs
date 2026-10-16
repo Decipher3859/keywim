@@ -26,7 +26,8 @@ pub fn run_session(
 
     println!("PAM session opened successfully");
 
-    let mut child = session::run(command, &user)?;
+    // Start the authenticated session on the native TTY backend.
+    let mut child = session::run(command, &["--backend", "tty"], &user)?;
 
     on_started();
 

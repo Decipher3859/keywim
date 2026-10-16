@@ -1,0 +1,7 @@
+{
+  "battery_low": {
+    "title": "Battery low",
+    "content": "The battery is at {percent}%. Consider charging.",
+    "notification_type": "warning"
+  }
+}

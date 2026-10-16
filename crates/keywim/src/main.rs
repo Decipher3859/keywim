@@ -1,5 +1,7 @@
 mod autostart;
 mod compositor;
+mod monitoring;
+mod widgets;
 
 use std::{env, process};
 

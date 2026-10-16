@@ -6,7 +6,7 @@ use std::{
     process::{Child, Command},
 };
 
-pub fn run(command: &str, user: &User) -> Result<Child, String> {
+pub fn run(command: &str, args: &[&str], user: &User) -> Result<Child, String> {
     let groups: Vec<Gid> = resolve_groups(user)?
         .into_iter()
         .map(Gid::from_raw)
@@ -16,6 +16,9 @@ pub fn run(command: &str, user: &User) -> Result<Child, String> {
     let gid = user.gid;
 
     let mut cmd = Command::new(command);
+
+    // Pass session arguments directly without invoking shell.
+    cmd.args(args);
 
     unsafe {
         cmd.pre_exec(move || {
@@ -85,7 +88,7 @@ mod tests {
     fn run_as_current_user() {
         let username = std::env::var("USER").expect("USER is not set");
         let user = resolve_user(&username).expect("User lookup failed");
-        let status = run("/usr/bin/id", &user).expect("Process start failed");
+        let status = run("/usr/bin/id", &[], &user).expect("Process start failed");
 
         assert!(status.success());
     }
@@ -96,7 +99,7 @@ mod tests {
         assert!(nix::unistd::Uid::effective().is_root());
 
         let user = resolve_user("damian").unwrap();
-        let status = run("/usr/bin/id", &user).unwrap();
+        let status = run("/usr/bin/id", &[], &user).unwrap();
 
         assert!(status.success());
     }

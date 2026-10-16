@@ -2,7 +2,13 @@ mod helpers;
 mod input;
 mod rendering;
 pub mod tty;
+mod zones;
 
+use crate::widgets::{
+    notification_templates::{self, load_templates},
+    popups::notification::{self, rasterize_notification},
+    rasterization::WidgetRasterizer,
+};
 use calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic};
 use helpers::send_frames_surface_tree;
 use smithay::{
@@ -32,7 +38,7 @@ use smithay::{
             protocol::{wl_buffer, wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
-    utils::{Rectangle, Serial, Transform},
+    utils::{Logical, Point, Rectangle, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
@@ -44,6 +50,7 @@ use smithay::{
     },
 };
 use std::{
+    fs,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -70,6 +77,8 @@ pub struct KeywimState {
     pub xdg_decoration_state: XdgDecorationState,
     // All currently registeres application Window
     pub windows: Vec<ToplevelSurface>,
+
+    pub notification_zone: zones::NotificationZone,
 }
 
 impl KeywimState {
@@ -104,7 +113,47 @@ impl KeywimState {
             windows: Vec::new(),
             xdg_shell_state,
             xdg_decoration_state,
+
+            notification_zone: zones::NotificationZone::default(),
         }
+    }
+    pub fn show_notification(
+        &mut self,
+        rasterizer: &WidgetRasterizer,
+        title: &str,
+        content: &str,
+        notification_type: &str,
+        location: Point<i32, Logical>,
+    ) -> Result<(), &'static str> {
+        let image =
+            notification::rasterize_notification(rasterizer, title, content, notification_type)?;
+
+        // Replace visible content only after rasterization and conversion succeed.
+        let buffer = image.into_render_buffer()?;
+        self.notification_zone.set_content(buffer, location);
+        Ok(())
+    }
+
+    pub fn show_battery_warning(&mut self, percent: u8) -> Result<(), String> {
+        let templates = load_templates().map_err(|e| e.to_string())?;
+        let template = templates
+            .get("battery_low")
+            .ok_or("Missing battery_low notification template")?;
+        let percent = percent.to_string();
+        let content = template.format_content(&[("percent", &percent)])?;
+
+        // Load font data only when a warning acutally needs to be displayed.
+        let font_data =
+            fs::read("/usr/share/fonts/gnu-free/FreeMono.otf").map_err(|e| e.to_string())?;
+        let rasterizer = WidgetRasterizer::new(&font_data, 20.0)?;
+        self.show_notification(
+            &rasterizer,
+            &template.title,
+            &content,
+            &template.notification_type,
+            (32, 32).into(),
+        )
+        .map_err(str::to_owned)
     }
 }
 

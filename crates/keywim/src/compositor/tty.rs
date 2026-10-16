@@ -1,4 +1,8 @@
 use super::{KeywimClientState, KeywimState, helpers::send_frames_surface_tree};
+use crate::{
+    monitoring::battery::{BatteryStatus, BatteryWarning, find_battery},
+    widgets::rasterization::WidgetRasterizer,
+};
 use calloop::EventLoop;
 use smithay::{
     backend::{
@@ -12,13 +16,7 @@ use smithay::{
         input::{Event, InputEvent, KeyState, KeyboardKeyEvent},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            Bind, Color32F, Frame, Renderer,
-            element::{
-                Kind,
-                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-            },
-            gles::GlesRenderer,
-            utils::draw_render_elements,
+            Bind, Color32F, Frame, Renderer, gles::GlesRenderer, utils::draw_render_elements,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::UdevBackend,
@@ -32,40 +30,66 @@ use smithay::{
         wayland_server::{Display, ListeningSocket},
     },
     utils::{Rectangle, SERIAL_COUNTER, Transform},
-    wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 use std::{
     cell::{Cell, RefCell},
+    fs,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+/// Runs the compositor directly n a TTY.
+///
+/// Sets up seat-managed graphics and input devices, initializes the Wayland server, and launches
+/// Alacritty. Processes client requests, input, rendering, and seat activation changes until
+/// Alacritty exits.
+///
+/// # Errors
+/// Returns an error description if setup or runtime processing fails.
 pub fn run_tty() -> Result<(), String> {
+    // Obtain the session for device access and its event source for activation and deactivation
+    // notifications.
     let (mut session, seat_notifier) =
         LibSeatSession::new().map_err(|e| format!("Seat initialization failed: {e}"))?;
     println!("Seat opened: {}", session.seat());
+
+    // Store the notifier in an Option so registration inside the device/connector loops can take
+    // ownership once, leaving None to detect repeated attempts.
     let mut seat_notifier = Some(seat_notifier);
+
+    // Discover input devices through udev and open them through current seat session.
     let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
+
+    // Restrict input handling to devices assigned to current seat.
     libinput
         .udev_assign_seat(&session.seat())
         .map_err(|_| "Libinput seat assignment failed".to_string())?;
+
+    // Retain access to the shared libinput context to pause and reactivate the session.
+    // Store the backend in an Option so event-loop registration can take ownership once.
     let mut input_backend = Some(LibinputInputBackend::new(libinput.clone()));
     let udev =
         UdevBackend::new(session.seat()).map_err(|e| format!("Udev initialization failed: {e}"))?;
 
+    // Iterate over DRM devices on current seat; only paths are needed.
     for (_, path) in udev.device_list() {
         println!("DRM device: {}", path.display());
+
+        // Open the device through the session for read/write access.
+        // Close the file descriptor on exec so child programs do not inherit it.
         let fd = session
             .open(path, OFlags::RDWR | OFlags::CLOEXEC)
             .map_err(|e| format!("DRM open failed: {e}"))?;
         println!("DRM opened: {}", path.display());
 
+        // Wrap the opened DRM device and query its available resource handles.
         let drm = DrmDeviceFd::new(fd.into());
         let resources = drm
             .resource_handles()
             .map_err(|e| format!("DRM resources failed: {e}"))?;
 
+        // Query the device's display connectors and skip those without a connected display.
         for handle in resources.connectors() {
             let connector = drm
                 .get_connector(*handle, false)
@@ -78,20 +102,30 @@ pub fn run_tty() -> Result<(), String> {
                 connector.state()
             );
 
+            //Skip connectors without connected display.
             if connector.state() != State::Connected {
                 continue;
             }
 
-            let mode = connector
+            // Use the preferred display mode, falling back to the first available mode.
+            let Some(mode) = connector
                 .modes()
                 .iter()
                 .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
                 .or_else(|| connector.modes().first())
                 .copied()
-                .ok_or_else(|| "Connected display has no modes".to_string())?;
-
+            else {
+                // Keep searching other connectors if this display offers no modes.
+                eprintln!(
+                    "Skipping {:?}-{}: connected display offers no modes",
+                    connector.interface(),
+                    connector.interface_id()
+                );
+                continue;
+            };
             println!("Selected mode: {:?}", mode);
 
+            // Find a CRTC that can drive this connector through one of its encoders.
             let mut selected_crtc = None;
             for encoder_handle in connector.encoders() {
                 let encoder = drm
@@ -107,8 +141,15 @@ pub fn run_tty() -> Result<(), String> {
                 }
             }
 
-            let crtc = selected_crtc.ok_or_else(|| "No compatible CRTC found".to_string())?;
-
+            // Keep searching if no CRTC can drive this connector.
+            let Some(crtc) = selected_crtc else {
+                eprintln!(
+                    "Skipping {:?}-{}: no compatible CRTC found",
+                    connector.interface(),
+                    connector.interface_id()
+                );
+                continue;
+            };
             println!(
                 "Selected output: {:?}-{}, CRTC: {:?}, mode: {:?}",
                 connector.interface(),
@@ -117,9 +158,11 @@ pub fn run_tty() -> Result<(), String> {
                 mode,
             );
 
+            // Initialize DRM output management and its envent source.
             let (mut device, drm_notifier) = DrmDevice::new(drm.clone(), false)
                 .map_err(|e| format!("DRM initialization failed: {e}"))?;
 
+            // Create an output surface for the sleected CRTC, mode, and connector.
             let surface = device
                 .create_surface(crtc, mode, &[*handle])
                 .map_err(|e| format!("DRM surface creation failed: {e}"))?;
@@ -185,6 +228,19 @@ pub fn run_tty() -> Result<(), String> {
             let mut wayland = Display::<KeywimState>::new()
                 .map_err(|e| format!("Wayland dislpay failed: {e}"))?;
             let mut state = KeywimState::new(&wayland.handle());
+
+            // Battery monitoring is optional and must not prevent session startup.
+            let battery_path = match find_battery() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("Battery detection failed: {error}");
+                    None
+                }
+            };
+
+            let mut battery_warning = BatteryWarning::default();
+            let mut next_battery_check = Instant::now();
+
             let socket = ListeningSocket::bind_auto("wayland", 1..32)
                 .map_err(|e| format!("Wayland socket failed: {e}"))?;
             let socket_name = socket.socket_name().unwrap().to_string_lossy();
@@ -261,6 +317,28 @@ pub fn run_tty() -> Result<(), String> {
             let start = Instant::now();
             let mut redraw = false;
             loop {
+                // Read sysfs at most every 30 seconds.
+                if Instant::now() >= next_battery_check {
+                    next_battery_check = Instant::now() + Duration::from_secs(30);
+
+                    if let Some(path) = &battery_path {
+                        match BatteryStatus::read(path) {
+                            Ok(status) => {
+                                if battery_warning.update(&status) {
+                                    match state.show_battery_warning(status.percent) {
+                                        Ok(()) => redraw = true,
+                                        Err(error) => {
+                                            eprintln!("Battery notification failed: {error}");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("Battery reading failed: {error}");
+                            }
+                        }
+                    }
+                }
                 if let Some(status) = terminal
                     .try_wait()
                     .map_err(|e| format!("Terminal status failed: {e}"))?
@@ -338,29 +416,9 @@ pub fn run_tty() -> Result<(), String> {
                     let (mut buffer, _) = buffered
                         .next_buffer()
                         .map_err(|e| format!("Next buffer failed: {e}"))?;
-                    let elements = state
-                        .windows
-                        .iter()
-                        .flat_map(|window| {
-                            let offset = with_states(window.wl_surface(), |states| {
-                                states
-                                    .cached_state
-                                    .get::<SurfaceCachedState>()
-                                    .current()
-                                    .geometry
-                                    .map(|g| (-g.loc.x, -g.loc.y))
-                                    .unwrap_or((0, 0))
-                            });
-                            render_elements_from_surface_tree(
-                                &mut renderer,
-                                window.wl_surface(),
-                                offset,
-                                1.0,
-                                1.0,
-                                Kind::Unspecified,
-                            )
-                        })
-                        .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
+                    // Keep zone ordering centralized across output backends.
+                    let elements = super::rendering::zone_elements(&mut renderer, &state)
+                        .map_err(|e| format!("Zone elements failed: {e}"))?;
 
                     let sync = {
                         let mut target = renderer
@@ -397,9 +455,10 @@ pub fn run_tty() -> Result<(), String> {
                 }
             }
 
-            break;
+            // End successfully after the compositor session has finished.
+            return Ok(());
         }
     }
-
-    Ok(())
+    // All DRM devices were checked without finding a usable display.
+    Err("No usable display output found".to_string())
 }
